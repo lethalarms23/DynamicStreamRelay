@@ -1,0 +1,9 @@
+[Desktop Entry]
+Type=Application
+Name=RTMP TimeShift Proxy
+Comment=Persistent RTMP relay with dynamic stream delay
+Exec=RTMPTimeShiftProxy
+Icon=rtmp-timeshift-proxy
+Categories=AudioVideo;Network;
+Terminal=false
+

@@ -1,0 +1,4 @@
+#!/usr/bin/env bash
+set -euo pipefail
+: "${RTSP_MINGW_ROOT:?RTSP_MINGW_ROOT must point to the Qt MinGW toolchain}"
+exec wine "${RTSP_MINGW_ROOT}/bin/g++.exe" "$@"
