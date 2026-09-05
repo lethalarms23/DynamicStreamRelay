@@ -2,6 +2,7 @@
 #include "media/UrlUtils.h"
 #include <QAbstractSocket>
 #include <QNetworkInterface>
+#include <QRegularExpression>
 #include <QSettings>
 #include <QTimer>
 #include <QUrl>
@@ -72,7 +73,22 @@ ApplicationController::ApplicationController(QObject* parent)
         scheduleSnapshotsUpdate();
     });
     connect(&mediamtx_, &MediaMTXManager::logLine, this,
-        [this](const QString& line) { logger_.log(Severity::Info, "MediaMTX", line); });
+        [this](const QString& line) {
+            // IngestReader polls the local RTMP path roughly once a second
+            // (always from loopback, since it's reading back the app's own
+            // local server) to detect when OBS starts publishing. Every
+            // attempt logs a connect+disconnect pair in MediaMTX, and the
+            // disconnect reason text varies by internal state ("no stream is
+            // available" vs "is not configured" right after a config
+            // reload) — chasing every wording is fragile, so this filters by
+            // origin instead: any RTMP connection from 127.0.0.1 is our own
+            // probe, not a real OBS publisher (which would show its actual
+            // LAN/Tailscale address). Carries no diagnostic value while
+            // waiting for a source.
+            static const QRegularExpression loopbackRtmpConn(R"(\[RTMP\]\s\[conn 127\.0\.0\.1:\d+\]\s(opened|closed:))");
+            if (loopbackRtmpConn.match(line).hasMatch()) return;
+            logger_.log(Severity::Info, "MediaMTX", line);
+        });
     connect(&mediamtx_, &MediaMTXManager::error, this,
         [this](const QString& message) { logger_.log(Severity::Error, "MediaMTX", message); });
     emit profilesChanged(profiles_, selectedProfileId_);
@@ -454,6 +470,19 @@ void ApplicationController::applyDelay(int seconds) {
     if(auto* p=profileById(selectedProfileId_)){seconds=std::clamp(seconds,0,p->maximumDelaySeconds);p->requestedDelaySeconds=seconds;config_=*p;sessionById(p->profileId)->applyDelay(seconds);saveProfiles();emit configChanged(config_);}
 }
 bool ApplicationController::cancelDelayIncrease(){auto*s=sessionById(selectedProfileId_);return s&&s->cancelDelayIncrease();}
+void ApplicationController::applyDelayForProfile(QString profileId, int seconds) {
+    auto* p = profileById(profileId); auto* session = sessionById(profileId);
+    if (!p || !session) return;
+    seconds = std::clamp(seconds, 0, p->maximumDelaySeconds);
+    p->requestedDelaySeconds = seconds;
+    session->applyDelay(seconds);
+    saveProfiles();
+    if (profileId == selectedProfileId_) { config_ = *p; emit configChanged(config_); }
+}
+bool ApplicationController::cancelDelayIncreaseForProfile(QString profileId) {
+    auto* session = sessionById(profileId);
+    return session && session->cancelDelayIncrease();
+}
 void ApplicationController::regenerateLocalKey(){
     if(auto*p=profileById(selectedProfileId_)){p->localStreamKey=ConfigurationManager::generateStreamKey();logger_.addSecret(p->localStreamKey);updateSelectedConfig();sessionById(p->profileId)->updateProfile(*p);saveProfiles();emit configChanged(config_);rebuildGateway();}
 }

@@ -7,10 +7,11 @@
 class QLabel; class QLineEdit; class QSpinBox; class QSlider; class QTableWidget; class QComboBox; class QPushButton; class QCheckBox;
 
 namespace rtsp {
+class WebPanelServer;
 class MainWindow final : public QMainWindow {
     Q_OBJECT
 public:
-    explicit MainWindow(ApplicationController& controller, QWidget* parent = nullptr);
+    explicit MainWindow(ApplicationController& controller, WebPanelServer& webPanel, QWidget* parent = nullptr);
 protected: void closeEvent(QCloseEvent* event) override;
 private slots:
     void updateSnapshot(AppSnapshot snapshot); void updateMetrics(StreamStatistics stats);
@@ -20,7 +21,7 @@ private:
     QWidget* createDelay(); QWidget* createOutput(); QWidget* createCapacity(); QWidget* createMetrics(); QWidget* createLogs();
     void updateIngestModeUi();
     void updateProfileDashboard();
-    ApplicationController& controller_; CapacityEstimator capacityEstimator_; AppSnapshot last_;
+    ApplicationController& controller_; WebPanelServer& webPanel_; CapacityEstimator capacityEstimator_; AppSnapshot last_;
     QLabel *overall_{}, *ingestStatus_{}, *sourceStatus_{}, *destinationStatus_{}, *effective_{}, *requested_{}, *buffer_{}, *uptime_{}, *delayProgress_{};
     QLineEdit *serverUrl_{}, *localKey_{}, *fullUrl_{}, *destinationUrl_{}, *destinationKey_{};
     QLineEdit* listenInterface_{};

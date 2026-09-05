@@ -48,6 +48,7 @@ add_executable(RTMPTimeShiftProxy WIN32
   src/media/OutboundPublisher.cpp
   src/metrics/MetricsCollector.cpp
   src/logging/Logger.cpp
+  src/panel/WebPanelServer.cpp
   src/ui/MainWindow.cpp)
 target_include_directories(RTMPTimeShiftProxy PRIVATE src)
 target_link_libraries(RTMPTimeShiftProxy PRIVATE

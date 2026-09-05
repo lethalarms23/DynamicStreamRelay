@@ -4,16 +4,21 @@
 #include "logging/Logger.h"
 #include "media/OutboundPublisher.h"
 #include <QCoreApplication>
+#include <QElapsedTimer>
 #include <QFile>
 #include <QProcess>
 #include <QRegularExpression>
 #include <QTemporaryDir>
 #include <QThread>
+#include <algorithm>
 #include <atomic>
 #include <chrono>
+#include <cmath>
+#include <cstring>
 #include <functional>
 #include <memory>
 #include <mutex>
+#include <vector>
 #include <gtest/gtest.h>
 
 using namespace rtsp;
@@ -93,6 +98,90 @@ TEST(IntegrationPipeline, CapacityBenchmarkMeasuresRequestedSoftwareWorkload) {
     EXPECT_GE(result.safeStreams,1);
     EXPECT_GE(result.encoderOpenLimit,1);
     EXPECT_GT(result.measuredFps,30.0);
+}
+
+TEST(IntegrationPipeline, SourceAudioRemainsContinuousAtZeroDelay) {
+    const QString mediaMtx = QStringLiteral(RTSP_SOURCE_DIR) + "/resources/mediamtx/linux/mediamtx";
+    if (!QFileInfo::exists(mediaMtx)) GTEST_SKIP() << "Bundled Linux MediaMTX is absent";
+    QTemporaryDir temporary; ASSERT_TRUE(temporary.isValid());
+    const auto configPath=temporary.path()+"/mediamtx.yml";QFile config(configPath);
+    ASSERT_TRUE(config.open(QIODevice::WriteOnly|QIODevice::Text));
+    config.write("logLevel: warn\napi: no\nmetrics: no\npprof: no\n"
+        "rtmp: yes\nrtmpAddress: 127.0.0.1:19430\nrtsp: no\nhls: no\nwebrtc: no\n"
+        "srt: no\nmoq: no\npaths:\n  all_others:\n");
+    config.close();
+    QProcess server;server.start(mediaMtx,{configPath});ASSERT_TRUE(server.waitForStarted(3000));QThread::msleep(500);
+
+    PacketBuffer buffer(30000000,128*1024*1024);IngestReader ingest(buffer);OutboundPublisher publisher(buffer);
+    AppConfig profile;profile.width=320;profile.height=180;profile.fps=30;profile.videoBitrateKbps=800;
+    profile.videoEncoder="libx264";profile.maximumBufferMiB=128;profile.maximumDelaySeconds=30;
+    std::atomic_bool outputConnected{false};
+    std::atomic_int ingestConnectedAtMs{-1},forwardingAtMs{-1};QElapsedTimer testClock;testClock.start();
+    std::mutex publisherDiagnosticsMutex;QString publisherDiagnostics;
+    QObject::connect(&publisher,&OutboundPublisher::connected,&publisher,
+        [&outputConnected](bool connected){outputConnected=connected;},Qt::DirectConnection);
+    QObject::connect(&publisher,&OutboundPublisher::error,&publisher,[&](const QString& message){
+        std::scoped_lock lock(publisherDiagnosticsMutex);publisherDiagnostics+=message+'\n';
+    },Qt::DirectConnection);
+    QObject::connect(&ingest,&IngestReader::connected,&publisher,
+        [&publisher,&ingestConnectedAtMs,&testClock](bool connected){
+            publisher.setSourceConnected(connected);if(connected&&ingestConnectedAtMs<0)ingestConnectedAtMs=testClock.elapsed();
+        },Qt::DirectConnection);
+    QObject::connect(&publisher,&OutboundPublisher::sourceForwardingChanged,&publisher,
+        [&forwardingAtMs,&testClock](bool forwarding,const QString&){if(forwarding&&forwardingAtMs<0)forwardingAtMs=testClock.elapsed();},Qt::DirectConnection);
+    publisher.start("rtmp://127.0.0.1:19430/live/output",profile);
+    ASSERT_TRUE(waitUntil([&]{return outputConnected.load();},8000));
+    // MediaMTX exposes a newly published RTMP path asynchronously; match the
+    // proven reader-attachment grace period used by the main pipeline test.
+    QThread::sleep(3);
+
+    const auto pcmPath=temporary.path()+"/audio.f32le";
+    QProcess sink;sink.setProcessChannelMode(QProcess::MergedChannels);
+    sink.start("ffmpeg",{"-y","-hide_banner","-loglevel","error","-i","rtmp://127.0.0.1:19430/live/output",
+        "-t","14","-map","0:a:0","-ac","1","-ar","48000","-f","f32le",pcmPath});
+    ASSERT_TRUE(sink.waitForStarted(3000));
+    QProcess source;source.setProcessChannelMode(QProcess::MergedChannels);
+    source.start("ffmpeg",{"-hide_banner","-loglevel","error","-re","-f","lavfi","-i","testsrc2=size=320x180:rate=30",
+        "-f","lavfi","-i","sine=frequency=1000:sample_rate=48000","-t","12","-c:v","libx264","-preset","ultrafast",
+        "-g","30","-pix_fmt","yuv420p","-c:a","aac","-f","flv","rtmp://127.0.0.1:19430/live/source"});
+    ASSERT_TRUE(source.waitForStarted(3000));
+    // Ensure the source publisher is registered before the ingest reader's
+    // first RTMP open attempt; otherwise its intentional 3 s timeout tests
+    // connection retry timing rather than audio continuity.
+    QThread::sleep(2);
+    ingest.start("rtmp://127.0.0.1:19430/live/source");
+    ASSERT_TRUE(source.waitForFinished(18000)) << source.readAll().constData();
+    ASSERT_TRUE(sink.waitForFinished(18000)) << sink.readAll().constData();
+    const auto sinkDiagnostics=sink.readAll();
+    QString diagnostics;{std::scoped_lock lock(publisherDiagnosticsMutex);diagnostics=publisherDiagnostics;}
+    ASSERT_EQ(sink.exitCode(),0) << sinkDiagnostics.constData() << "\nPublisher:\n" << diagnostics.toStdString()
+        << "\nMediaMTX:\n" << server.readAll().constData();
+    ingest.stop();publisher.stop();server.terminate();server.waitForFinished(3000);
+
+    QFile pcm(pcmPath);ASSERT_TRUE(pcm.open(QIODevice::ReadOnly)) << sinkDiagnostics.constData();const auto samples=pcm.readAll();
+    constexpr int windowSamples=4800;const int windowBytes=windowSamples*static_cast<int>(sizeof(float));
+    const int windows=samples.size()/windowBytes;std::vector<bool> active(windows,false);
+    for(int window=0;window<windows;++window){
+        double energy=0;
+        for(int sample=0;sample<windowSamples;++sample){
+            float value=0;std::memcpy(&value,samples.constData()+window*windowBytes+sample*sizeof(float),sizeof(value));
+            energy+=static_cast<double>(value)*value;
+        }
+        active[window]=std::sqrt(energy/windowSamples)>0.01;
+    }
+    const auto first=std::find(active.cbegin(),active.cend(),true);
+    const auto last=std::find(active.crbegin(),active.crend(),true);
+    ASSERT_NE(first,active.cend()) << "Relayed audio remained silent";
+    const int firstIndex=static_cast<int>(std::distance(active.cbegin(),first));
+    const int lastIndex=windows-1-static_cast<int>(std::distance(active.crbegin(),last));
+    const int span=lastIndex-firstIndex+1;
+    const int activeWindows=static_cast<int>(std::count(active.cbegin()+firstIndex,active.cbegin()+lastIndex+1,true));
+    QString activePattern;for(const bool window:active)activePattern+=window?'#':'.';
+    EXPECT_GE(span,60) << "Too little source audio reached the destination; windows=" << activePattern.toStdString()
+        << ", ingest connected at " << ingestConnectedAtMs.load() << " ms, video forwarding at " << forwardingAtMs.load() << " ms";
+    EXPECT_GE(activeWindows*100,span*85)
+        << "Audio contained repeated dropouts: " << activeWindows << " active 100 ms windows across a " << span
+        << " window span; windows=" << activePattern.toStdString();
 }
 }
 

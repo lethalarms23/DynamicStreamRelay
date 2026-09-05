@@ -14,29 +14,41 @@ std::size_t PacketBuffer::accountedBytes(const BufferedPacket& p) {
 bool PacketBuffer::append(BufferedPacket p) {
     std::scoped_lock lock(mutex_);
     if (!storageEnabled_) return true;
-    if (!packets_.empty() && p.dtsUs < packets_.back().dtsUs) return false;
     p.sequence = nextSequence_++;
     bytes_ += accountedBytes(p);
+    mediaTimes_.insert(p.dtsUs);
     packets_.push_back(std::move(p));
     enforceLimits();
     return true;
 }
 
 void PacketBuffer::enforceLimits() {
+    bool evictedForLimit = false;
     while (!packets_.empty()) {
-        const auto span = packets_.back().dtsUs - packets_.front().dtsUs;
+        const auto span = mediaTimes_.empty() ? 0 : *mediaTimes_.rbegin() - *mediaTimes_.begin();
         const auto durationLimit = std::min(maxDurationUs_, retainedDurationUs_);
         if (bytes_ <= maxBytes_ && span <= durationLimit) break;
         bytes_ -= accountedBytes(packets_.front());
-        packets_.pop_front(); ++overflows_;
+        if (const auto timestamp = mediaTimes_.find(packets_.front().dtsUs); timestamp != mediaTimes_.end())
+            mediaTimes_.erase(timestamp);
+        packets_.pop_front(); ++overflows_; evictedForLimit = true;
     }
-    // A decodable buffer must begin no earlier than its first remaining video keyframe.
+    // Align to a keyframe only when enforcing a duration or memory limit has
+    // actually evicted media. During normal playback discardBefore() can leave
+    // the cursor inside a GOP; deleting that GOP when the next keyframe arrives
+    // would remove undecoded audio and produce periodic silence bursts.
+    if (evictedForLimit) needsKeyframeAlignment_ = true;
+    if (!needsKeyframeAlignment_) return;
     auto key = std::find_if(packets_.begin(), packets_.end(), [](const auto& p) { return p.type == StreamType::Video && p.keyframe; });
+    if (key == packets_.end()) return;
     while (key != packets_.end() && packets_.begin() != key) {
         bytes_ -= accountedBytes(packets_.front());
+        if (const auto timestamp = mediaTimes_.find(packets_.front().dtsUs); timestamp != mediaTimes_.end())
+            mediaTimes_.erase(timestamp);
         packets_.pop_front();
         key = std::find_if(packets_.begin(), packets_.end(), [](const auto& p) { return p.type == StreamType::Video && p.keyframe; });
     }
+    needsKeyframeAlignment_ = false;
 }
 
 std::optional<BufferedPacket> PacketBuffer::packet(std::uint64_t seq) const {
@@ -53,8 +65,8 @@ std::optional<BufferedPacket> PacketBuffer::packetAtOrAfter(std::uint64_t seq) c
 std::optional<BufferedPacket> PacketBuffer::nearestKeyframeAtOrBefore(std::int64_t time) const {
     std::scoped_lock lock(mutex_); std::optional<BufferedPacket> found;
     for (const auto& p : packets_) {
-        if (p.dtsUs > time) break;
-        if (p.type == StreamType::Video && p.keyframe) found = p;
+        if (p.dtsUs <= time && p.type == StreamType::Video && p.keyframe
+            && (!found || p.dtsUs > found->dtsUs)) found = p;
     }
     return found;
 }
@@ -62,13 +74,14 @@ std::optional<BufferedPacket> PacketBuffer::nearestKeyframeAtOrBefore(std::int64
 std::optional<CursorSelection> PacketBuffer::selectAt(std::int64_t desired) const {
     std::scoped_lock lock(mutex_); const BufferedPacket* video = nullptr;
     for (const auto& p : packets_) {
-        if (p.dtsUs > desired) break;
-        if (p.type == StreamType::Video && p.keyframe) video = &p;
+        if (p.dtsUs <= desired && p.type == StreamType::Video && p.keyframe
+            && (!video || p.dtsUs > video->dtsUs)) video = &p;
     }
     if (!video) return std::nullopt;
     const BufferedPacket* audio = nullptr;
     for (const auto& p : packets_) {
-        if (p.type == StreamType::Audio && p.ptsUs >= video->ptsUs) { audio = &p; break; }
+        if (p.type == StreamType::Audio && p.ptsUs >= video->ptsUs
+            && (!audio || p.ptsUs < audio->ptsUs)) audio = &p;
     }
     return CursorSelection{video->sequence, audio ? audio->sequence : video->sequence, video->ptsUs};
 }
@@ -76,7 +89,10 @@ std::optional<CursorSelection> PacketBuffer::selectAt(std::int64_t desired) cons
 void PacketBuffer::discardBefore(std::uint64_t seq) {
     std::scoped_lock lock(mutex_);
     while (!packets_.empty() && packets_.front().sequence < seq) {
-        bytes_ -= accountedBytes(packets_.front()); packets_.pop_front();
+        bytes_ -= accountedBytes(packets_.front());
+        if (const auto timestamp = mediaTimes_.find(packets_.front().dtsUs); timestamp != mediaTimes_.end())
+            mediaTimes_.erase(timestamp);
+        packets_.pop_front();
     }
 }
 void PacketBuffer::setLimits(std::int64_t maxDurationUs, std::size_t maxBytes) {
@@ -91,13 +107,15 @@ void PacketBuffer::setStoragePolicy(bool enabled, std::int64_t retainedDurationU
     retainedDurationUs_ = std::max<std::int64_t>(0, retainedDurationUs);
     if (!storageEnabled_) {
         packets_.clear();
+        mediaTimes_.clear();
         bytes_ = 0;
+        needsKeyframeAlignment_ = false;
         return;
     }
     enforceLimits();
 }
-std::int64_t PacketBuffer::durationUs() const { std::scoped_lock lock(mutex_); return packets_.size() < 2 ? 0 : packets_.back().dtsUs - packets_.front().dtsUs; }
-std::int64_t PacketBuffer::inputHeadUs() const { std::scoped_lock lock(mutex_); return packets_.empty() ? 0 : packets_.back().dtsUs; }
+std::int64_t PacketBuffer::durationUs() const { std::scoped_lock lock(mutex_); return mediaTimes_.size() < 2 ? 0 : *mediaTimes_.rbegin() - *mediaTimes_.begin(); }
+std::int64_t PacketBuffer::inputHeadUs() const { std::scoped_lock lock(mutex_); return mediaTimes_.empty() ? 0 : *mediaTimes_.rbegin(); }
 std::size_t PacketBuffer::memoryBytes() const { std::scoped_lock lock(mutex_); return bytes_; }
 std::size_t PacketBuffer::size() const { std::scoped_lock lock(mutex_); return packets_.size(); }
 std::uint64_t PacketBuffer::overflowCount() const { std::scoped_lock lock(mutex_); return overflows_; }

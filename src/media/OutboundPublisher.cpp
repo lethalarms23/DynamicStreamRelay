@@ -31,6 +31,19 @@ bool sendFrames(AVCodecContext* codec, AVFrame* frame, AVFormatContext* output, 
 bool copyFramePixels(AVFrame* destination, const AVFrame* source) {
     return destination && source && av_frame_make_writable(destination) >= 0 && av_frame_copy(destination, source) >= 0;
 }
+// FFmpeg 7.1 (libavcodec 61) deprecated AVCodec's raw capability arrays
+// (sample_fmts, pix_fmts, ...) in favor of avcodec_get_supported_config();
+// FFmpeg 8.0 (libavcodec 62) removes the old fields entirely. Support both.
+AVSampleFormat firstSupportedSampleFormat(const AVCodec* codec) {
+#if LIBAVCODEC_VERSION_MAJOR >= 61
+    const AVSampleFormat* formats = nullptr;
+    const int rc = avcodec_get_supported_config(nullptr, codec, AV_CODEC_CONFIG_SAMPLE_FORMAT, 0,
+        reinterpret_cast<const void**>(&formats), nullptr);
+    return (rc >= 0 && formats) ? formats[0] : AV_SAMPLE_FMT_FLTP;
+#else
+    return codec->sample_fmts ? codec->sample_fmts[0] : AV_SAMPLE_FMT_FLTP;
+#endif
+}
 bool loadStandbyImage(const QString& path, AVFrame* destination) {
     QImage source(path);
     if (source.isNull() || !destination) return false;
@@ -172,7 +185,7 @@ bool OutboundPublisher::publishSession(std::stop_token token, const QString& des
         emit encoderError(message); emit error(message); return false;
     }
     audio->sample_rate = p.audioSampleRate; av_channel_layout_default(&audio->ch_layout, 2);
-    audio->sample_fmt = ac->sample_fmts ? ac->sample_fmts[0] : AV_SAMPLE_FMT_FLTP; audio->time_base = {1, p.audioSampleRate}; audio->bit_rate = p.audioBitrateKbps * 1000LL;
+    audio->sample_fmt = firstSupportedSampleFormat(ac); audio->time_base = {1, p.audioSampleRate}; audio->bit_rate = p.audioBitrateKbps * 1000LL;
     if (output->oformat->flags & AVFMT_GLOBALHEADER) audio->flags |= AV_CODEC_FLAG_GLOBAL_HEADER;
     rc = avcodec_open2(audio.get(), ac, nullptr);
     if (rc < 0) {

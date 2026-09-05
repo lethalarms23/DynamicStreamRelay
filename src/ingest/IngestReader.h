@@ -18,7 +18,10 @@ signals:
 private:
     void run(std::stop_token stop, QString url);
     PacketBuffer& buffer_; std::jthread worker_; std::atomic_bool interrupt_{false};
-    TimestampNormalizer normalizer_;
+    // Separate clocks per stream type — see TimestampNormalizer's comment for why
+    // video and audio must never share one.
+    TimestampNormalizer videoNormalizer_;
+    TimestampNormalizer audioNormalizer_;
     std::uint64_t nextSessionId_{0};
     std::uint64_t nextCodecGeneration_{0};
 };

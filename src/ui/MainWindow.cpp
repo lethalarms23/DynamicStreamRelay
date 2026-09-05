@@ -1,5 +1,6 @@
 #include "ui/MainWindow.h"
 #include "media/UrlUtils.h"
+#include "panel/WebPanelServer.h"
 #include <QApplication>
 #include <QCheckBox>
 #include <QClipboard>
@@ -9,12 +10,15 @@
 #include <QDesktopServices>
 #include <QFormLayout>
 #include <QFileDialog>
+#include <QFrame>
+#include <QFontDatabase>
 #include <QGridLayout>
 #include <QGroupBox>
 #include <QHeaderView>
 #include <QInputDialog>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMessageBox>
 #include <QPushButton>
 #include <QScrollArea>
@@ -22,7 +26,7 @@
 #include <QSignalBlocker>
 #include <QSlider>
 #include <QSpinBox>
-#include <QTabWidget>
+#include <QStackedWidget>
 #include <QTableWidget>
 #include <QUrl>
 #include <QVBoxLayout>
@@ -30,20 +34,62 @@
 namespace rtsp {
 namespace {
 QLabel* valueLabel(const QString& text = "—") { auto* l = new QLabel(text); l->setStyleSheet("font-size:15px;font-weight:600;color:#f4f7fb;"); return l; }
+QLabel* dataLabel(const QString& text = "—") { auto* l = new QLabel(text); QFont f = QFontDatabase::systemFont(QFontDatabase::FixedFont); f.setPointSize(13); f.setWeight(QFont::DemiBold); l->setFont(f); l->setStyleSheet("color:#f4f7fb;"); return l; }
 QWidget* row(std::initializer_list<QWidget*> widgets) { auto* w = new QWidget; auto* l = new QHBoxLayout(w); l->setContentsMargins(0,0,0,0); for (auto* x : widgets) l->addWidget(x); l->addStretch(); return w; }
 QPushButton* copyButton(QLineEdit* source, const QString& text = "Copy") { auto* b = new QPushButton(text); QObject::connect(b, &QPushButton::clicked, source, [source]{ QApplication::clipboard()->setText(source->text()); }); return b; }
 QString seconds(qint64 us) { return QString::number(us / 1000000.0, 'f', 1) + " s"; }
 }
 
-MainWindow::MainWindow(ApplicationController& c, QWidget* parent) : QMainWindow(parent), controller_(c), capacityEstimator_(this) {
+MainWindow::MainWindow(ApplicationController& c, WebPanelServer& webPanel, QWidget* parent) : QMainWindow(parent), controller_(c), webPanel_(webPanel), capacityEstimator_(this) {
     setWindowTitle("RTMP TimeShift Proxy");
-    auto* root = new QWidget; auto* layout = new QVBoxLayout(root); layout->addWidget(createStatus());
-    auto* tabs = new QTabWidget; auto* setup = new QWidget; auto* setupLayout = new QVBoxLayout(setup);
+
+    auto* root = new QWidget;
+    auto* rootLayout = new QHBoxLayout(root);
+    rootLayout->setContentsMargins(0,0,0,0); rootLayout->setSpacing(0);
+
+    // --- Sidebar ---
+    auto* sidebar = new QFrame; sidebar->setObjectName("sidebar"); sidebar->setFixedWidth(216);
+    auto* sideLayout = new QVBoxLayout(sidebar); sideLayout->setContentsMargins(0,0,0,0); sideLayout->setSpacing(0);
+    auto* brand = new QWidget; auto* brandLayout = new QVBoxLayout(brand); brandLayout->setContentsMargins(20,22,20,18);
+    auto* brandTitle = new QLabel("TimeShift Proxy"); brandTitle->setStyleSheet("font-size:15px;font-weight:700;color:#f4f7fb;");
+    auto* brandSubtitle = new QLabel("Relay control"); brandSubtitle->setStyleSheet("font-size:11px;color:#6b7280;");
+    brandLayout->addWidget(brandTitle); brandLayout->addWidget(brandSubtitle);
+    sideLayout->addWidget(brand);
+
+    auto* nav = new QListWidget; nav->setObjectName("nav"); nav->setFrameShape(QFrame::NoFrame);
+    nav->setFocusPolicy(Qt::NoFocus);
+    const QStringList navItems{"Streams","Selected Profile","Ingest Settings","Delay","Output","Capacity","Metrics","Logs"};
+    for (const auto& item : navItems) { auto* i = new QListWidgetItem(item); i->setSizeHint(QSize(0,38)); nav->addItem(i); }
+    sideLayout->addWidget(nav, 1);
+
+    auto* sideFooter = new QWidget; auto* footerLayout = new QHBoxLayout(sideFooter); footerLayout->setContentsMargins(20,14,20,18);
+    auto* dot = new QLabel("●"); dot->setStyleSheet("color:#3979d9;font-size:9px;");
+    auto* footerLabel = new QLabel("Local build"); footerLabel->setStyleSheet("font-size:11px;color:#6b7280;");
+    footerLayout->addWidget(dot); footerLayout->addWidget(footerLabel); footerLayout->addStretch();
+    sideLayout->addWidget(sideFooter);
+    rootLayout->addWidget(sidebar);
+
+    // --- Main column ---
+    auto* mainCol = new QWidget; auto* mainLayout = new QVBoxLayout(mainCol);
+    mainLayout->setContentsMargins(0,0,0,0); mainLayout->setSpacing(0);
+    mainLayout->addWidget(createStatus());
+
+    auto* pages = new QStackedWidget; pages->setObjectName("pages");
+    auto* setup = new QWidget; auto* setupLayout = new QVBoxLayout(setup);
     setupLayout->addWidget(createIngest()); setupLayout->addWidget(createDestination()); setupLayout->addStretch();
-    tabs->addTab(createDashboard(), "Streams"); tabs->addTab(setup, "Selected Profile"); tabs->addTab(createIngestSettings(), "Ingest Settings");
-    tabs->addTab(createDelay(), "Delay"); tabs->addTab(createOutput(), "Output"); tabs->addTab(createCapacity(), "Capacity");
-    tabs->addTab(createMetrics(), "Metrics"); tabs->addTab(createLogs(), "Logs");
-    layout->addWidget(tabs, 1); setCentralWidget(root);
+    pages->addWidget(createDashboard()); pages->addWidget(setup); pages->addWidget(createIngestSettings());
+    pages->addWidget(createDelay()); pages->addWidget(createOutput()); pages->addWidget(createCapacity());
+    pages->addWidget(createMetrics()); pages->addWidget(createLogs());
+
+    auto* pagesWrap = new QWidget; auto* pagesWrapLayout = new QVBoxLayout(pagesWrap);
+    pagesWrapLayout->setContentsMargins(28,20,28,24); pagesWrapLayout->addWidget(pages);
+    mainLayout->addWidget(pagesWrap, 1);
+    rootLayout->addWidget(mainCol, 1);
+
+    connect(nav, &QListWidget::currentRowChanged, pages, &QStackedWidget::setCurrentIndex);
+    nav->setCurrentRow(0);
+
+    setCentralWidget(root);
     connect(&controller_, &ApplicationController::snapshotChanged, this, &MainWindow::updateSnapshot);
     connect(&controller_, &ApplicationController::metricsChanged, this, &MainWindow::updateMetrics);
     connect(controller_.logger(), &Logger::entry, this, &MainWindow::appendLog);
@@ -129,11 +175,24 @@ MainWindow::MainWindow(ApplicationController& c, QWidget* parent) : QMainWindow(
     QTimer::singleShot(0, this, [this]{ updateProfileDashboard(); });
 }
 QWidget* MainWindow::createStatus() {
-    auto* box = new QGroupBox("Status"); auto* g = new QGridLayout(box);
-    overall_=valueLabel(); ingestStatus_=valueLabel(); sourceStatus_=valueLabel(); destinationStatus_=valueLabel(); effective_=valueLabel(); requested_=valueLabel(); buffer_=valueLabel(); uptime_=valueLabel();
-    const std::array<std::pair<QString,QLabel*>,8> fields{{{"Overall",overall_},{"Local ingest",ingestStatus_},{"OBS source",sourceStatus_},{"Destination",destinationStatus_},{"Effective delay",effective_},{"Requested delay",requested_},{"Buffer",buffer_},{"Uptime",uptime_}}};
-    for (int i=0;i<static_cast<int>(fields.size());++i) { g->addWidget(new QLabel(fields[i].first), (i/4)*2, i%4); g->addWidget(fields[i].second,(i/4)*2+1,i%4); }
-    return box;
+    auto* bar = new QFrame; bar->setObjectName("statusBar");
+    auto* h = new QHBoxLayout(bar); h->setContentsMargins(28,16,28,16); h->setSpacing(36);
+    overall_=valueLabel(); ingestStatus_=valueLabel(); sourceStatus_=valueLabel(); destinationStatus_=valueLabel();
+    effective_=dataLabel(); requested_=dataLabel(); buffer_=dataLabel(); uptime_=dataLabel();
+    auto* badge = new QFrame; badge->setObjectName("overallBadge");
+    auto* badgeLayout = new QHBoxLayout(badge); badgeLayout->setContentsMargins(12,6,14,6); badgeLayout->setSpacing(8);
+    auto* badgeDot = new QLabel("●"); badgeDot->setObjectName("overallDot"); badgeDot->setStyleSheet("color:#8b93a1;font-size:9px;");
+    badgeLayout->addWidget(badgeDot); badgeLayout->addWidget(overall_);
+    h->addWidget(badge);
+    const std::array<std::pair<QString,QLabel*>,7> fields{{{"Local ingest",ingestStatus_},{"OBS source",sourceStatus_},{"Destination",destinationStatus_},{"Effective delay",effective_},{"Requested delay",requested_},{"Buffer",buffer_},{"Uptime",uptime_}}};
+    for (const auto& [caption, value] : fields) {
+        auto* cell = new QWidget; auto* v = new QVBoxLayout(cell); v->setContentsMargins(0,0,0,0); v->setSpacing(2);
+        auto* label = new QLabel(caption); label->setStyleSheet("color:#6b7280;font-size:11px;font-weight:500;");
+        v->addWidget(label); v->addWidget(value);
+        h->addWidget(cell);
+    }
+    h->addStretch();
+    return bar;
 }
 QWidget* MainWindow::createDashboard() {
     auto* page=new QWidget; auto* layout=new QVBoxLayout(page);
@@ -160,31 +219,31 @@ QWidget* MainWindow::createDashboard() {
         const auto rows=profileTable_->selectionModel()->selectedRows();
         return rows.isEmpty()?controller_.selectedProfileId():profileTable_->item(rows.front().row(),0)->data(Qt::UserRole).toString();
     };
-    auto* add=new QPushButton("New profile");
+    auto* add=new QPushButton("+  New profile"); add->setProperty("role","secondary");
     connect(add,&QPushButton::clicked,this,[this]{
         bool ok=false; const auto name=QInputDialog::getText(this,"New stream profile","Profile name",QLineEdit::Normal,{},&ok);
         if(ok){const auto id=controller_.createProfile(name);controller_.selectProfile(id);}
     });
-    auto* duplicate=new QPushButton("Duplicate");
+    auto* duplicate=new QPushButton("⧉  Duplicate"); duplicate->setProperty("role","secondary");
     connect(duplicate,&QPushButton::clicked,this,[this,selectedId]{const auto id=controller_.duplicateProfile(selectedId());if(!id.isEmpty())controller_.selectProfile(id);});
-    auto* rename=new QPushButton("Rename");
+    auto* rename=new QPushButton("✎  Rename"); rename->setProperty("role","secondary");
     connect(rename,&QPushButton::clicked,this,[this,selectedId]{
         const auto id=selectedId(); const auto& profiles=controller_.profiles();
         const auto profile=std::find_if(profiles.cbegin(),profiles.cend(),[&](const auto&p){return p.profileId==id;});
         if(profile==profiles.cend())return;bool ok=false;const auto name=QInputDialog::getText(this,"Rename profile","Profile name",QLineEdit::Normal,profile->profileName,&ok);if(ok)controller_.renameProfile(id,name);
     });
-    auto* remove=new QPushButton("Remove");
+    auto* remove=new QPushButton("✕  Remove"); remove->setProperty("role","danger");
     connect(remove,&QPushButton::clicked,this,[this,selectedId]{
         if(QMessageBox::question(this,"Remove profile","Remove this inactive profile and its saved credentials?")==QMessageBox::Yes&&!controller_.removeProfile(selectedId()))
             QMessageBox::warning(this,"Cannot remove","Stop the profile first. At least one profile must remain.");
     });
-    auto* start=new QPushButton("Start selected");
+    auto* start=new QPushButton("▶  Start selected"); start->setProperty("role","primary");
     connect(start,&QPushButton::clicked,this,[this,selectedId]{controller_.startProfile(selectedId());});
-    auto* stop=new QPushButton("Stop selected");
+    auto* stop=new QPushButton("■  Stop selected"); stop->setProperty("role","danger");
     connect(stop,&QPushButton::clicked,this,[this,selectedId]{controller_.stopProfile(selectedId());});
-    auto* startAll=new QPushButton("Start all");
+    auto* startAll=new QPushButton("▶  Start all"); startAll->setProperty("role","primary");
     connect(startAll,&QPushButton::clicked,&controller_,&ApplicationController::startAllProfiles);
-    auto* stopAll=new QPushButton("Stop all");
+    auto* stopAll=new QPushButton("■  Stop all"); stopAll->setProperty("role","danger");
     connect(stopAll,&QPushButton::clicked,&controller_,&ApplicationController::stopAllRelays);
     layout->addWidget(heading);layout->addWidget(help);layout->addWidget(profileSummary_);layout->addWidget(profileTable_,1);
     layout->addWidget(row({add,duplicate,rename,remove,start,stop,startAll,stopAll}));
@@ -341,6 +400,23 @@ QWidget* MainWindow::createIngestSettings() {
     securityForm->addRow("SRT passphrase",row({srtPassphrase_,copyButton(srtPassphrase_),showSecrets}));
     securityForm->addRow(row({generateKey,generateSrt}));
 
+    auto* panelBox=new QGroupBox("Remote panel (web)"); auto* panelForm=new QFormLayout(panelBox);
+    auto* panelUrl=new QLineEdit(webPanel_.suggestedUrl()); panelUrl->setReadOnly(true);
+    auto* panelToken=new QLineEdit(webPanel_.token()); panelToken->setReadOnly(true); panelToken->setEchoMode(QLineEdit::Password);
+    auto* showToken=new QCheckBox("Show");
+    connect(showToken,&QCheckBox::toggled,this,[panelToken](bool on){panelToken->setEchoMode(on?QLineEdit::Normal:QLineEdit::Password);});
+    auto* regenerateToken=new QPushButton("Regenerate token");
+    connect(regenerateToken,&QPushButton::clicked,this,[this,panelToken,panelUrl]{
+        if(QMessageBox::question(this,"Regenerate panel token","Any device using the current link (e.g. your phone) will need the new one. Continue?")!=QMessageBox::Yes)return;
+        webPanel_.regenerateToken(); panelToken->setText(webPanel_.token()); panelUrl->setText(webPanel_.suggestedUrl());
+    });
+    panelForm->addRow("Open on your phone",row({panelUrl,copyButton(panelUrl)}));
+    panelForm->addRow("Token",row({panelToken,copyButton(panelToken),showToken}));
+    panelForm->addRow(regenerateToken);
+    auto* panelHelp=new QLabel("Reachable over the same network the OBS connection uses (Tailscale, ZeroTier, LAN, or port-forward). Works whether or not a stream is currently running.");
+    panelHelp->setWordWrap(true); panelHelp->setStyleSheet("color:#aeb6c2;");
+    panelForm->addRow(panelHelp);
+
     connect(allowLan_,&QCheckBox::toggled,this,[this](bool enabled){
         if (enabled && QMessageBox::warning(this,"Allow network connections",
                 "This exposes the selected ingest protocol to devices on your network. Continue?",
@@ -355,7 +431,7 @@ QWidget* MainWindow::createIngestSettings() {
     connect(srtLatency_,&QSpinBox::editingFinished,this,applySrt);
     connect(srtEncryption_,&QCheckBox::toggled,&controller_,&ApplicationController::setSrtEncryption);
 
-    pageLayout->addWidget(networkBox); pageLayout->addWidget(protocolBox); pageLayout->addWidget(securityBox); pageLayout->addStretch();
+    pageLayout->addWidget(networkBox); pageLayout->addWidget(protocolBox); pageLayout->addWidget(securityBox); pageLayout->addWidget(panelBox); pageLayout->addStretch();
     updateIngestModeUi();
     return page;
 }

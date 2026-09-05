@@ -31,7 +31,12 @@ void IngestReader::run(std::stop_token stop, QString url) {
         if (video < 0) { emit error("Unsupported source: H.264 video is required."); return; }
         const auto session = ++nextSessionId_;
         const auto codecGeneration = ++nextCodecGeneration_;
-        normalizer_.beginSession(session); emit connected(true);
+        // Both clocks start at the same origin so a reconnect doesn't introduce
+        // a fixed A/V offset, even though each then advances independently.
+        const auto sharedBase = std::max(videoNormalizer_.lastOutput(), audioNormalizer_.lastOutput()) + 1;
+        videoNormalizer_.beginSession(session, sharedBase);
+        audioNormalizer_.beginSession(session, sharedBase);
+        emit connected(true);
         emit codecInfo(QString("H.264 %1x%2%3").arg(format->streams[video]->codecpar->width)
             .arg(format->streams[video]->codecpar->height).arg(audio >= 0 ? " + AAC" : " + generated silence"));
         PacketPtr packet(av_packet_alloc());
@@ -39,9 +44,11 @@ void IngestReader::run(std::stop_token stop, QString url) {
             if (packet->stream_index != video && packet->stream_index != audio) { av_packet_unref(packet.get()); continue; }
             const auto* stream = format->streams[packet->stream_index];
             auto toUs = [stream](std::int64_t t) { return t == AV_NOPTS_VALUE ? std::int64_t{0} : av_rescale_q(t, stream->time_base, AVRational{1, 1000000}); };
-            const auto ndts = normalizer_.normalize(toUs(packet->dts));
+            const bool isVideo = packet->stream_index == video;
+            auto& normalizer = isVideo ? videoNormalizer_ : audioNormalizer_;
+            const auto ndts = normalizer.normalize(toUs(packet->dts));
             BufferedPacket copy;
-            copy.type = packet->stream_index == video ? StreamType::Video : StreamType::Audio;
+            copy.type = isVideo ? StreamType::Video : StreamType::Audio;
             copy.dtsUs = ndts; copy.ptsUs = ndts + std::max<std::int64_t>(0, toUs(packet->pts) - toUs(packet->dts));
             copy.durationUs = toUs(packet->duration); copy.keyframe = (packet->flags & AV_PKT_FLAG_KEY) != 0;
             copy.data = QByteArray(reinterpret_cast<const char*>(packet->data), packet->size);

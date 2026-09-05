@@ -2,7 +2,31 @@
 #include <gtest/gtest.h>
 using namespace rtsp;
 static BufferedPacket pkt(StreamType type, qint64 time, bool key=false, int bytes=10) { BufferedPacket p; p.type=type;p.dtsUs=p.ptsUs=time;p.durationUs=1000;p.keyframe=key;p.data=QByteArray(bytes,'x');return p; }
-TEST(PacketBuffer, InsertionRequiresDtsOrdering) { PacketBuffer b(1000000,1000); EXPECT_TRUE(b.append(pkt(StreamType::Video,100,true))); EXPECT_FALSE(b.append(pkt(StreamType::Audio,99))); EXPECT_EQ(b.size(),1); }
+TEST(PacketBuffer, AcceptsInterleavedTracksWithReorderedMediaTimes) { PacketBuffer b(1000000,1000); EXPECT_TRUE(b.append(pkt(StreamType::Video,100,true))); EXPECT_TRUE(b.append(pkt(StreamType::Audio,99))); EXPECT_EQ(b.size(),2); }
+TEST(PacketBuffer, FutureKeyframeDoesNotDeleteActiveGop) {
+    PacketBuffer b(10000000,1024*1024);
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,0,true)));
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,100000)));
+    ASSERT_TRUE(b.append(pkt(StreamType::Audio,110000)));
+    b.discardBefore(2);
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,2000000,true)));
+    EXPECT_TRUE(b.packet(2).has_value());
+    EXPECT_TRUE(b.packet(3).has_value());
+    EXPECT_EQ(b.size(),3);
+}
+TEST(PacketBuffer, LimitEvictionWaitsForAndAlignsToFutureKeyframe) {
+    PacketBuffer b(1000000,1024*1024);
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,0,true)));
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,1500000)));
+    ASSERT_FALSE(b.nearestKeyframeAtOrBefore(1500000).has_value());
+    ASSERT_TRUE(b.append(pkt(StreamType::Audio,1600000)));
+    ASSERT_TRUE(b.append(pkt(StreamType::Video,2000000,true)));
+    const auto first=b.packet(b.firstSequence());
+    ASSERT_TRUE(first.has_value());
+    EXPECT_EQ(first->type,StreamType::Video);
+    EXPECT_TRUE(first->keyframe);
+    EXPECT_EQ(first->dtsUs,2000000);
+}
 TEST(PacketBuffer, DurationUsesMediaTimestamps) { PacketBuffer b(1000000,1000); b.append(pkt(StreamType::Video,100,true));b.append(pkt(StreamType::Audio,250)); EXPECT_EQ(b.durationUs(),150); }
 TEST(PacketBuffer, EnforcesMaximumMemory) { PacketBuffer b(1000000,25); b.append(pkt(StreamType::Video,0,true,20)); b.append(pkt(StreamType::Video,10,true,20)); EXPECT_LE(b.memoryBytes(),25); EXPECT_GT(b.overflowCount(),0); }
 TEST(PacketBuffer, FindsKeyframeAtOrBefore) { PacketBuffer b(1000000,1000); b.append(pkt(StreamType::Video,0,true));b.append(pkt(StreamType::Video,50));b.append(pkt(StreamType::Video,100,true)); auto p=b.nearestKeyframeAtOrBefore(75); ASSERT_TRUE(p);EXPECT_EQ(p->dtsUs,0); }

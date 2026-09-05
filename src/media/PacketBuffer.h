@@ -5,6 +5,7 @@
 #include <deque>
 #include <mutex>
 #include <optional>
+#include <set>
 
 namespace rtsp {
 enum class StreamType { Video, Audio };
@@ -53,10 +54,12 @@ private:
     void enforceLimits();
     mutable std::mutex mutex_;
     std::deque<BufferedPacket> packets_;
+    std::multiset<std::int64_t> mediaTimes_;
     std::int64_t maxDurationUs_;
     std::int64_t retainedDurationUs_;
     std::size_t maxBytes_;
     bool storageEnabled_{true};
+    bool needsKeyframeAlignment_{false};
     std::size_t bytes_{0};
     std::uint64_t nextSequence_{1};
     std::uint64_t overflows_{0};

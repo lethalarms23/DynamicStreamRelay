@@ -2,8 +2,8 @@
 #include <algorithm>
 
 namespace rtsp {
-void TimestampNormalizer::beginSession(std::uint64_t id) {
-    sessionId_ = id; firstInput_.reset(); sessionBase_ = lastOutput_ < 0 ? 0 : lastOutput_ + 1;
+void TimestampNormalizer::beginSession(std::uint64_t id, std::int64_t sharedBase) {
+    sessionId_ = id; firstInput_.reset(); sessionBase_ = sharedBase;
 }
 std::int64_t TimestampNormalizer::normalize(std::int64_t input) {
     if (!firstInput_) firstInput_ = input;

@@ -62,6 +62,12 @@ public slots:
     void applyDelay(int seconds);
     bool cancelDelayIncrease();
     void regenerateLocalKey();
+    // Profile-scoped variants: unlike applyDelay()/cancelDelayIncrease() above,
+    // these act on an explicit profile instead of selectedProfileId_, so a
+    // remote controller (the web panel) can act on any profile without
+    // hijacking which profile is selected in the desktop UI.
+    void applyDelayForProfile(QString profileId, int seconds);
+    bool cancelDelayIncreaseForProfile(QString profileId);
 signals:
     void snapshotChanged(rtsp::AppSnapshot snapshot);
     void sessionSnapshotsChanged(QList<rtsp::AppSnapshot> snapshots);
